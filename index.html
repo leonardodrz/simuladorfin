@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulador Financeiro</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+body { margin:0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const NL_BOX3_EFFECTIVE_RATE = 0.0222; // Box 3 drag anual ~2.22%
+
+// ─── SIMULATION ENGINE ───────────────────────────────────────────────────────
+function simulate(p) {
+  const years = p.retirementAge - p.currentAge;
+  if (years <= 0 || years > 60) return null;
+  const months = years * 12;
+
+  const n = v => (isNaN(v) || v === "" ? 0 : Number(v));
+
+  // ── FX: compute future exchange rates from today's spot + BRL depreciation ──
+  // BRL depreciates X% per year vs hard currencies → future rates compound
+  const brlDeprRate = n(p.brlDepreciation) / 100; // e.g. 0.035
+  const spotUsdBrl  = n(p.spotUsdBrl);             // R$ per $1 today
+  const spotEurBrl  = n(p.spotEurBrl);             // R$ per €1 today
+  // At retirement: BRL is weaker → more R$ per $1/€1
+  const futUsdBrl = spotUsdBrl * Math.pow(1 + brlDeprRate, years); // R$ por $1 no futuro
+  const futEurBrl = spotEurBrl * Math.pow(1 + brlDeprRate, years); // R$ por €1 no futuro
+  // Convert to: € per R$1 = 1 / futEurBrl
+  const brl2eur = futEurBrl > 0 ? 1 / futEurBrl : 0; // €X por R$1
+  // Convert to: € per $1 = futUsdBrl / futEurBrl (go $ → R$ → €)
+  const usd2eur = futEurBrl > 0 ? futUsdBrl / futEurBrl : 0; // €X por $1
+
+  // monthly growth rates
+  const rBR    = Math.pow(1 + n(p.brFixedRate) / 100, 1/12) - 1;
+  const rUSD   = Math.pow(1 + n(p.usdReturn)   / 100, 1/12) - 1;
+  const rEUR   = Math.pow(1 + n(p.eurReturn)   / 100, 1/12) - 1;
+  const rBTC   = Math.pow(1 + n(p.btcReturn)   / 100, 1/12) - 1;
+  const rBox3  = Math.pow(1 - NL_BOX3_EFFECTIVE_RATE, 1/12) - 1; // negative drag
+
+  // inflation deflators (annual)
+  const infBR  = n(p.brInflation) / 100;
+  const infUSD = n(p.usdInflation) / 100;
+  const infEUR = n(p.eurInflation) / 100;
+
+  let brFixed = n(p.brFixed);
+  let usd     = n(p.usdPortfolio);
+  let eur     = n(p.eurPortfolio);
+  let btc     = n(p.btcValue);
+  let brProp  = n(p.brPropertyValue);
+  let nlProp  = n(p.nlPropertyValue);
+
+  const rBrProp = Math.pow(1 + n(p.brPropertyInflation)/100, 1/12) - 1;
+  const rNlProp = Math.pow(1 + n(p.nlPropertyInflation)/100, 1/12) - 1;
+
+  const timeline = [];
+
+  // contribuições mensais (zeram na aposentadoria, que é o fim do loop)
+  const cBR  = n(p.brMonthlyContrib);
+  const cUSD = n(p.usdMonthlyContrib);
+  const cEUR = n(p.eurMonthlyContrib);
+
+  for (let yr = 1; yr <= years; yr++) {
+    // saldos de abertura do ano
+    const brOpen  = brFixed;
+    const usdOpen = usd;
+    const eurOpen = eur;
+    const btcOpen = btc;
+    const brPropOpen = brProp;
+    const nlPropOpen = nlProp;
+
+    // acumuladores do ano
+    let brContribYr = 0, usdContribYr = 0, eurContribYr = 0;
+
+    for (let mm = 1; mm <= 12; mm++) {
+      brFixed = brFixed * (1 + rBR)  + cBR;   brContribYr  += cBR;
+      usd     = usd     * (1 + rUSD) + cUSD;  usdContribYr += cUSD;
+      eur     = eur * (1 + rEUR + rBox3) + cEUR; eurContribYr += cEUR;
+      btc     = btc     * (1 + rBTC);
+      brProp  = brProp  * (1 + rBrProp);
+      nlProp  = nlProp  * (1 + rNlProp);
+    }
+
+    // rendimento do ano = saldo final - saldo inicial - aportes do ano
+    const brReturn  = brFixed - brOpen  - brContribYr;
+    const usdReturn = usd     - usdOpen - usdContribYr;
+    const eurReturn = eur     - eurOpen - eurContribYr;
+    const btcReturn = btc     - btcOpen;
+
+    // valores reais (deflacionados)
+    const brFixedReal = brFixed / Math.pow(1 + infBR,  yr);
+    const usdReal     = usd     / Math.pow(1 + infUSD, yr);
+    const eurReal     = eur     / Math.pow(1 + infEUR, yr);
+    const btcRealBRL  = btc;
+
+    // quanto a inflação corroeu (nominal - real)
+    const brInflLoss  = brFixed - brFixedReal;
+    const usdInflLoss = usd     - usdReal;
+    const eurInflLoss = eur     - eurReal;
+
+    // conversão para EUR (após impostos)
+    const brFixedEUR = brFixedReal * brl2eur * (1 - 0.15);
+    const usdEUR     = usdReal     * usd2eur * (1 - 0.15);
+    const btcEUR     = btcRealBRL  * brl2eur * (1 - 0.15);
+    const brPropEUR  = brProp * brl2eur;
+
+    const totalInv = brFixedEUR + usdEUR + eurReal + btcEUR;
+    const totalAll = totalInv + brPropEUR + nlProp;
+
+    // aluguel anual — usa câmbio FUTURO (brl2eur calculado no topo da função)
+    const rentBrYr = p.brPropertyMode === "rent" ? n(p.brPropertyRent) * brl2eur * 12 : 0;
+    const rentNlYr = p.nlPropertyMode === "rent" ? n(p.nlPropertyRent) * 12 : 0;
+
+    timeline.push({
+      year: yr, age: p.currentAge + yr,
+      // BRL
+      brOpen: Math.round(brOpen), brReturn: Math.round(brReturn),
+      brContrib: Math.round(brContribYr), brClose: Math.round(brFixed),
+      brReal: Math.round(brFixedReal), brInflLoss: Math.round(brInflLoss),
+      // USD
+      usdOpen: Math.round(usdOpen), usdReturn: Math.round(usdReturn),
+      usdContrib: Math.round(usdContribYr), usdClose: Math.round(usd),
+      usdReal: Math.round(usdReal), usdInflLoss: Math.round(usdInflLoss),
+      // EUR
+      eurOpen: Math.round(eurOpen), eurReturn: Math.round(eurReturn),
+      eurContrib: Math.round(eurContribYr), eurClose: Math.round(eur),
+      eurReal: Math.round(eurReal), eurInflLoss: Math.round(eurInflLoss),
+      // BTC
+      btcBRL: Math.round(btc), btcReturn: Math.round(btcReturn),
+      // imóveis
+      brProp: Math.round(brProp), nlProp: Math.round(nlProp),
+      rentBrYr: Math.round(rentBrYr), rentNlYr: Math.round(rentNlYr),
+      // convertidos
+      brFixedEUR: Math.round(brFixedEUR), usdEUR: Math.round(usdEUR),
+      btcEUR: Math.round(btcEUR), brPropEUR: Math.round(brPropEUR),
+      nlPropEUR: Math.round(nlProp),
+      totalInv: Math.round(totalInv), totalAll: Math.round(totalAll),
+    });
+  }
+
+  const ret = timeline[timeline.length - 1];
+  if (!ret) return null;
+
+  // ── câmbio spot: para valores que o usuário insere em R$ de hoje e quer ver em € de hoje ──
+  const spotBrl2eur = n(p.spotEurBrl) > 0 ? 1 / n(p.spotEurBrl) : 0;
+
+  // ── renda de aluguel em € — usando câmbio FUTURO (na aposentadoria o real vale menos) ──
+  // O usuário insere o aluguel em R$ de hoje, mas ele será recebido no futuro
+  // → converter pelo câmbio projetado na aposentadoria (brl2eur já calculado acima)
+  const brPropRent = p.brPropertyMode === "rent"
+    ? n(p.brPropertyRent) * brl2eur      // R$/mês → €/mês no câmbio futuro
+    : 0;
+  const nlPropRent = p.nlPropertyMode === "rent"
+    ? n(p.nlPropertyRent)                // já em €, sem conversão
+    : 0;
+  const totalRentMonthly = brPropRent + nlPropRent;
+
+  // ── previdência (entra aos 68) — também convertida pelo câmbio futuro ──
+  const nlPension = n(p.nlPensionMonthly);                 // já em €
+  const brPension = n(p.brPensionMonthly) * brl2eur;       // R$ → € câmbio futuro
+  const totalPension = nlPension + brPension;
+
+  // ── meta mensal em € de hoje ──
+  const goal = n(p.monthlyGoal);
+
+  // ────────────────────────────────────────────────────────────────
+  // FASE 2: RETIRADA — dos retirementAge até 68
+  // Patrimônio continua rendendo (taxa real média ponderada)
+  // Aportes = zero
+  // Retirada mensal = goal - aluguel (o que falta o patrimônio cobrir)
+  // ────────────────────────────────────────────────────────────────
+  const withdrawalYears = Math.max(0, 68 - n(p.retirementAge));
+
+  // taxa real mensal do portfólio na fase de retirada
+  // usamos média ponderada simples EUR/USD real como proxy do portfólio consolidado
+  const rEUR_real = Math.pow(1 + n(p.eurReturn)/100, 1/12) / Math.pow(1 + infEUR, 1/12) - 1;
+  const rUSD_real = Math.pow(1 + n(p.usdReturn)/100, 1/12) / Math.pow(1 + infUSD, 1/12) - 1;
+  const rPort_real = (rEUR_real + rUSD_real) / 2; // taxa real mensal do portfólio
+
+  // retirada mensal sustentável do portfólio
+  // independente da renda objetivo
+  const sustainableWithdrawal = ret.totalInv * (0.04 / 12);
+  const withdrawalNeeded = sustainableWithdrawal;
+
+  // simula o saldo do portfólio mês a mês durante a retirada
+  let portfolioBalance = ret.totalInv; // em € reais de hoje
+  const withdrawalTimeline = [];
+
+  for (let yr = 1; yr <= withdrawalYears; yr++) {
+    const openBal = portfolioBalance;
+    let totalWithdrawn = 0;
+    let totalGrowth = 0;
+
+    for (let mm = 1; mm <= 12; mm++) {
+      const growth = portfolioBalance * rPort_real;
+      totalGrowth += growth;
+      portfolioBalance = portfolioBalance + growth - withdrawalNeeded;
+      totalWithdrawn += withdrawalNeeded;
+      if (portfolioBalance < 0) portfolioBalance = 0; // não vai negativo
+    }
+
+    const age = n(p.retirementAge) + yr;
+    const rentIncome = totalRentMonthly;       // aluguel mensal (real)
+    const portIncome = withdrawalNeeded;        // retirada mensal do portfólio
+    const totalIncome = rentIncome + portIncome; // total mensal recebido
+
+    withdrawalTimeline.push({
+      year: yr, age,
+      openBal:  Math.round(openBal),
+      growth:   Math.round(totalGrowth),
+      withdrawn: Math.round(totalWithdrawn),
+      closeBal: Math.round(portfolioBalance),
+      rentMonthly:  Math.round(rentIncome),
+      portMonthly:  Math.round(portIncome),
+      totalMonthly: Math.round(totalIncome),
+      gap: Math.round(goal - totalIncome),
+      isSustainable: portfolioBalance > 0,
+    });
+  }
+
+  // saldo do portfólio ao chegar nos 68 (já com 8 anos de retirada)
+  const portfolioAt68 = portfolioBalance;
+  const portfolioAt68Income = portfolioAt68 * (rPort_real * 12); // renda anual aos 68
+  const monthlyFromPortAt68 = portfolioAt68 * (0.04 / 12);       // regra 4% aos 68
+
+  // ── renda total na aposentadoria ──
+  // Capacidade real do portfólio: quanto ele consegue entregar (4% SWR)
+  const SWR = 0.04 / 12;
+  const fromInv = ret.totalInv * SWR; // máximo sustentável do portfólio
+
+  // Aos 60: portfólio entrega no máximo fromInv + aluguel
+  // withdrawalNeeded é o que QUEREMOS retirar; fromInv é o que o portfólio CONSEGUE
+  const totalAt60 = fromInv + totalRentMonthly;
+
+  // Aos 68: portfólio erodido + aluguel + previdência
+  const totalAt68 = monthlyFromPortAt68 + totalRentMonthly + totalPension;
+
+  const gapAt60 = goal - totalAt60;
+  const gapAt68 = goal - totalAt68;
+
+  // ── aporte adicional para fechar gap aos 60 ──
+  // patrimônio extra necessário = gapAt60 / SWR
+  // convertido em aporte mensal pela fórmula de anuidade (taxa real)
+  const portfolioNeeded = gapAt60 > 0 ? (gapAt60 / SWR) : 0;
+  const addMonthly = portfolioNeeded > 0 && rPort_real > 0
+    ? portfolioNeeded * rPort_real / (Math.pow(1 + rPort_real, months) - 1)
+    : 0;
+
+  return {
+    timeline, ret,
+    withdrawalTimeline,
+    fromInv:        Math.round(fromInv),
+    brPropRent:     Math.round(brPropRent),
+    nlPropRent:     Math.round(nlPropRent),
+    totalRentMonthly: Math.round(totalRentMonthly),
+    withdrawalNeeded: Math.round(withdrawalNeeded),
+    sustainableWithdrawal: Math.round(sustainableWithdrawal),
+    totalAt60:      Math.round(totalAt60),
+    portfolioAt68:  Math.round(portfolioAt68),
+    totalAt68:      Math.round(totalAt68),
+    gapAt60:        Math.round(gapAt60),
+    gapAt68:        Math.round(gapAt68),
+    addMonthly:     Math.round(addMonthly),
+    years,
+    withdrawalYears,
+    portfolioNeeded: Math.round(portfolioNeeded),
+    // FX
+    futUsdBrl: Math.round(futUsdBrl * 100) / 100,
+    futEurBrl: Math.round(futEurBrl * 100) / 100,
+    brl2eur:   Math.round(brl2eur * 10000) / 10000,
+    usd2eur:   Math.round(usd2eur * 1000) / 1000,
+  };
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+const fmt  = (n, c="€") => `${c}${Number(n||0).toLocaleString("pt-BR")}`;
+const fmtR = (n)         => `R$${Number(n||0).toLocaleString("pt-BR")}`;
+const fmtD = (n)         => `$${Number(n||0).toLocaleString("pt-BR")}`;
+
+// ─── CONTROLLED INPUT — stores string while typing, parses on blur ────────────
+function Field({ label, value, onChange, pre="", suf="", hint="" }) {
+  const [local, setLocal] = useState(String(value ?? ""));
+  // sync when parent changes (e.g. reset)
+  const strVal = String(value ?? "");
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <label style={{ display:"block", fontSize:11, fontWeight:600, color:"#7A8FA6",
+        textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:3 }}>
+        {label}{hint && <span style={{ fontWeight:400, textTransform:"none", color:"#4A6080", marginLeft:5 }}>{hint}</span>}
+      </label>
+      <div style={{ display:"flex", alignItems:"center", background:"#0A131D",
+        border:"1px solid #1E2D3D", borderRadius:6, overflow:"hidden" }}>
+        {pre && <span style={{ padding:"0 9px", color:"#4A9EFF", fontSize:12,
+          fontWeight:700, borderRight:"1px solid #1E2D3D", whiteSpace:"nowrap" }}>{pre}</span>}
+        <input
+          type="text"
+          inputMode="decimal"
+          value={local}
+          onChange={e => setLocal(e.target.value)}
+          onBlur={e => {
+            const parsed = parseFloat(e.target.value.replace(",","."));
+            const safe = isNaN(parsed) ? 0 : parsed;
+            setLocal(String(safe));
+            onChange(safe);
+          }}
+          style={{ flex:1, background:"transparent", border:"none", outline:"none",
+            color:"#E8F0FE", padding:"7px 9px", fontSize:13,
+            fontFamily:"'DM Mono','Courier New',monospace" }}
+        />
+        {suf && <span style={{ padding:"0 9px", color:"#4A9EFF", fontSize:11,
+          borderLeft:"1px solid #1E2D3D", whiteSpace:"nowrap" }}>{suf}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Radio({ label, value, onChange, options }) {
+  return (
+    <div style={{ marginBottom:10 }}>
+      <div style={{ fontSize:11, fontWeight:600, color:"#7A8FA6", textTransform:"uppercase",
+        letterSpacing:"0.07em", marginBottom:5 }}>{label}</div>
+      <div style={{ display:"flex", gap:8 }}>
+        {options.map(o => (
+          <button key={o.value} onClick={() => onChange(o.value)}
+            style={{ flex:1, padding:"6px 0", borderRadius:6, cursor:"pointer", fontSize:12,
+              fontWeight:600, border: value===o.value ? "1px solid #4A9EFF" : "1px solid #1E2D3D",
+              background: value===o.value ? "#0D2040" : "#0A131D",
+              color: value===o.value ? "#4A9EFF" : "#6B7A8D" }}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Card({ title, color, children }) {
+  return (
+    <div style={{ background:"#0E1A26", borderRadius:10, borderLeft:`3px solid ${color}`,
+      border:`1px solid ${color}22`, padding:"16px 18px", marginBottom:14 }}>
+      <div style={{ fontSize:11, fontWeight:700, color, textTransform:"uppercase",
+        letterSpacing:"0.1em", marginBottom:14 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function KPI({ label, value, sub, color="#E8F0FE", big=false }) {
+  return (
+    <div style={{ background:"#0E1A26", border:"1px solid #1A2D3D", borderRadius:10,
+      padding:"14px 16px", flex:1, minWidth:130 }}>
+      <div style={{ fontSize:10, color:"#5A6E82", fontWeight:600, textTransform:"uppercase",
+        letterSpacing:"0.08em", marginBottom:5 }}>{label}</div>
+      <div style={{ fontSize: big?26:20, fontWeight:700, color,
+        fontFamily:"'DM Mono','Courier New',monospace", lineHeight:1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize:10, color:"#4A6080", marginTop:3 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function MiniChart({ data, color="#4A9EFF" }) {
+  if (!data || data.length < 2) return null;
+  const W=440, H=70;
+  const max = Math.max(...data), min = Math.min(...data,0);
+  const range = max - min || 1;
+  const pts = data.map((v,i) => {
+    const x = (i/(data.length-1))*W;
+    const y = H - ((v-min)/range)*H;
+    return `${x},${y}`;
+  }).join(" ");
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display:"block" }}>
+      <defs>
+        <linearGradient id={`g${color.replace("#","")}`} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.25"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points={`0,${H} ${pts} ${W},${H}`}
+        fill={`url(#g${color.replace("#","")})`}/>
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="2"/>
+    </svg>
+  );
+}
+
+// ─── TIMELINE TABLE — abas por moeda para auditar a mecânica ──────────────────
+function TimelineTable({ timeline, withdrawalTimeline, retAge }) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState("BR");
+  if (!timeline?.length) return null;
+
+  const th = { padding:"7px 9px", textAlign:"right", color:"#5A6E82",
+    borderBottom:"1px solid #1A2D3D", whiteSpace:"nowrap", fontSize:10 };
+  const td = { padding:"5px 9px", textAlign:"right", whiteSpace:"nowrap" };
+
+  const tabs = [
+    { id:"BR",       label:"🇧🇷 Renda Fixa R$",   color:"#4AFF8C" },
+    { id:"USD",      label:"🇺🇸 ETFs USD",         color:"#FFD166" },
+    { id:"EUR",      label:"🇳🇱 ETFs EUR",         color:"#4A9EFF" },
+    { id:"RENT",     label:"🏠 Aluguéis",          color:"#60A5FA" },
+    { id:"TOTAL",    label:"Σ Consolidado €",      color:"#A78BFA" },
+    { id:"WITHDRAW", label:"📉 Retirada 60→68",    color:"#FF6B9D" },
+  ];
+
+  // marca a linha de aposentadoria (último ano, onde aportes param)
+  const isRetRow = r => r.age === retAge;
+
+  return (
+    <div style={{ marginTop:20 }}>
+      <button onClick={() => setOpen(o=>!o)}
+        style={{ background:"#0D2040", border:"1px solid #1E3A5C", borderRadius:7,
+          color:"#4A9EFF", padding:"7px 18px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+        {open ? "▲ Fechar auditoria" : "🔍 Auditar cálculos ano a ano"}
+      </button>
+
+      {open && (
+        <div style={{ marginTop:12 }}>
+          {/* abas */}
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:10 }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)}
+                style={{ padding:"6px 12px", borderRadius:7, cursor:"pointer",
+                  fontSize:11, fontWeight:600,
+                  border: tab===t.id ? `1px solid ${t.color}` : "1px solid #1A2D3D",
+                  background: tab===t.id ? `${t.color}1A` : "#0A131D",
+                  color: tab===t.id ? t.color : "#5A6E82" }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ fontSize:10, color:"#4A6080", marginBottom:8, lineHeight:1.5 }}>
+            Saldo final = saldo inicial + rendimento do ano + aportes do ano. Valor real = saldo final
+            descontado da inflação. A linha destacada marca a aposentadoria — a partir dali os aportes param.
+          </div>
+
+          <div style={{ overflowX:"auto" }}>
+            <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11,
+              fontFamily:"'DM Mono','Courier New',monospace" }}>
+
+              {/* ── ABA R$ ── */}
+              {tab==="BR" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","Saldo inicial R$","+ Rendimento R$","+ Aportes R$",
+                    "= Saldo final R$","Valor real R$","Perda p/ inflação"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {timeline.map((r,i)=>(
+                    <tr key={i} style={{ background: isRetRow(r)?"#1A2410":(i%2===0?"#08111A":"#0E1A26") }}>
+                      <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                      <td style={{...td, color:"#7A8FA6"}}>{fmtR(r.brOpen)}</td>
+                      <td style={{...td, color:"#4AFF8C"}}>+{fmtR(r.brReturn)}</td>
+                      <td style={{...td, color:"#60A5FA"}}>{r.brContrib>0?`+${fmtR(r.brContrib)}`:"—"}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:700}}>{fmtR(r.brClose)}</td>
+                      <td style={{...td, color:"#A78BFA"}}>{fmtR(r.brReal)}</td>
+                      <td style={{...td, color:"#FF6B6B"}}>−{fmtR(r.brInflLoss)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </>}
+
+              {/* ── ABA USD ── */}
+              {tab==="USD" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","Saldo inicial $","+ Rendimento $","+ Aportes $",
+                    "= Saldo final $","Valor real $","Perda p/ inflação"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {timeline.map((r,i)=>(
+                    <tr key={i} style={{ background: isRetRow(r)?"#241F10":(i%2===0?"#08111A":"#0E1A26") }}>
+                      <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                      <td style={{...td, color:"#7A8FA6"}}>{fmtD(r.usdOpen)}</td>
+                      <td style={{...td, color:"#4AFF8C"}}>+{fmtD(r.usdReturn)}</td>
+                      <td style={{...td, color:"#60A5FA"}}>{r.usdContrib>0?`+${fmtD(r.usdContrib)}`:"—"}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:700}}>{fmtD(r.usdClose)}</td>
+                      <td style={{...td, color:"#A78BFA"}}>{fmtD(r.usdReal)}</td>
+                      <td style={{...td, color:"#FF6B6B"}}>−{fmtD(r.usdInflLoss)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </>}
+
+              {/* ── ABA EUR ── */}
+              {tab==="EUR" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","Saldo inicial €","+ Rendimento €","+ Aportes €",
+                    "= Saldo final €","Valor real €","Perda p/ inflação"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {timeline.map((r,i)=>(
+                    <tr key={i} style={{ background: isRetRow(r)?"#101C24":(i%2===0?"#08111A":"#0E1A26") }}>
+                      <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                      <td style={{...td, color:"#7A8FA6"}}>{fmt(r.eurOpen)}</td>
+                      <td style={{...td, color:"#4AFF8C"}}>+{fmt(r.eurReturn)}</td>
+                      <td style={{...td, color:"#60A5FA"}}>{r.eurContrib>0?`+${fmt(r.eurContrib)}`:"—"}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:700}}>{fmt(r.eurClose)}</td>
+                      <td style={{...td, color:"#A78BFA"}}>{fmt(r.eurReal)}</td>
+                      <td style={{...td, color:"#FF6B6B"}}>−{fmt(r.eurInflLoss)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </>}
+
+              {/* ── ABA ALUGUÉIS ── */}
+              {tab==="RENT" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","Aluguel NL (€/ano)","Aluguel BR (€/ano)",
+                    "Total aluguel €/ano","Total aluguel €/mês","Ativo?"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {timeline.map((r,i)=>{
+                    const active = r.age >= retAge;
+                    const totalYr = active ? r.rentNlYr + r.rentBrYr : 0;
+                    return (
+                      <tr key={i} style={{ background: isRetRow(r)?"#101C24":(i%2===0?"#08111A":"#0E1A26") }}>
+                        <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                        <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                        <td style={{...td, color: active?"#60A5FA":"#3A4A5A"}}>{active?fmt(r.rentNlYr):"—"}</td>
+                        <td style={{...td, color: active?"#34D399":"#3A4A5A"}}>{active?fmt(r.rentBrYr):"—"}</td>
+                        <td style={{...td, color: active?"#E8F0FE":"#3A4A5A", fontWeight:700}}>{active?fmt(totalYr):"—"}</td>
+                        <td style={{...td, color: active?"#A78BFA":"#3A4A5A", fontWeight:700}}>{active?fmt(Math.round(totalYr/12)):"—"}</td>
+                        <td style={{...td, color: active?"#4AFF8C":"#5A4A4A", fontSize:10}}>{active?"✓ recebendo":"acumulando"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </>}
+
+              {/* ── ABA CONSOLIDADO ── */}
+              {tab==="TOTAL" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","R$→€ (líq)","$→€ (líq)","€ real","BTC→€",
+                    "Imóvel NL €","Imóvel BR €","Total inv €","Total c/ imóv €"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {timeline.map((r,i)=>(
+                    <tr key={i} style={{ background: isRetRow(r)?"#16122A":(i%2===0?"#08111A":"#0E1A26") }}>
+                      <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                      <td style={{...td, color:"#4AFF8C"}}>{fmt(r.brFixedEUR)}</td>
+                      <td style={{...td, color:"#FFD166"}}>{fmt(r.usdEUR)}</td>
+                      <td style={{...td, color:"#4A9EFF"}}>{fmt(r.eurReal)}</td>
+                      <td style={{...td, color:"#FF6B9D"}}>{fmt(r.btcEUR)}</td>
+                      <td style={{...td, color:"#60A5FA"}}>{fmt(r.nlPropEUR)}</td>
+                      <td style={{...td, color:"#34D399"}}>{fmt(r.brPropEUR)}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:700}}>{fmt(r.totalInv)}</td>
+                      <td style={{...td, color:"#A78BFA", fontWeight:700}}>{fmt(r.totalAll)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </>}
+
+              {/* ── ABA RETIRADA 60→68 ── */}
+              {tab==="WITHDRAW" && <>
+                <thead><tr style={{ background:"#0A131D" }}>
+                  {["Ano","Idade","Saldo início €","+ Rendimento €","− Retirada €",
+                    "= Saldo fim €","Aluguel /mês","Retirada /mês","Total recebido","Gap vs meta","Sustentável?"].map(h=>(
+                    <th key={h} style={th}>{h}</th>))}
+                </tr></thead>
+                <tbody>
+                  {(!withdrawalTimeline || withdrawalTimeline.length === 0) ? (
+                    <tr><td colSpan={11} style={{...td, color:"#5A6E82", textAlign:"center", padding:"20px"}}>
+                      Aposentadoria aos 68 ou mais — não há fase de retirada antes da previdência.
+                    </td></tr>
+                  ) : withdrawalTimeline.map((r,i)=>(
+                    <tr key={i} style={{ background: !r.isSustainable ? "#2A0A0A" : (i%2===0?"#08111A":"#0E1A26") }}>
+                      <td style={{...td, color:"#5A6E82"}}>{r.year}</td>
+                      <td style={{...td, color:"#E8F0FE", fontWeight:600}}>{r.age}</td>
+                      <td style={{...td, color:"#7A8FA6"}}>{fmt(r.openBal)}</td>
+                      <td style={{...td, color:"#4AFF8C"}}>+{fmt(r.growth)}</td>
+                      <td style={{...td, color:"#FF6B9D"}}>−{fmt(r.withdrawn)}</td>
+                      <td style={{...td, color: r.isSustainable?"#E8F0FE":"#FF6B6B", fontWeight:700}}>{fmt(r.closeBal)}</td>
+                      <td style={{...td, color:"#60A5FA"}}>{fmt(r.rentMonthly)}</td>
+                      <td style={{...td, color:"#FF6B9D"}}>{fmt(r.portMonthly)}</td>
+                      <td style={{...td, color:"#A78BFA", fontWeight:700}}>{fmt(r.totalMonthly)}</td>
+                      <td style={{...td, color: r.gap<=0?"#4AFF8C":"#FF6B6B"}}>{r.gap<=0?`+${fmt(Math.abs(r.gap))}`:fmt(r.gap)}</td>
+                      <td style={{...td, color: r.isSustainable?"#4AFF8C":"#FF6B6B", fontSize:10}}>
+                        {r.isSustainable ? "✓" : "⚠ esgotado"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </>}
+
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [p, setP] = useState({
+    currentAge: 43, retirementAge: 60,
+    monthlyGoal: 5000,
+    // BR fixed income
+    brFixed: 0, brFixedRate: 7, brInflation: 4.5, brMonthlyContrib: 0,
+    // USD
+    usdPortfolio: 0, usdReturn: 8, usdInflation: 3, usdMonthlyContrib: 0,
+    // EUR
+    eurPortfolio: 0, eurReturn: 7, eurInflation: 2.5, eurMonthlyContrib: 0,
+    // BTC
+    btcValue: 0, btcReturn: 0,
+    // Properties
+    brPropertyValue: 0, brPropertyInflation: 4.5,
+    brPropertyMode: "rent", brPropertyRent: 0,
+    nlPropertyValue: 0, nlPropertyInflation: 3,
+    nlPropertyMode: "rent", nlPropertyRent: 0,
+    // Pensions
+    nlPensionMonthly: 0, brPensionMonthly: 0,
+    // FX — current spot rates + BRL annual depreciation
+    spotUsdBrl: 5.70,   // R$ por $1 hoje
+    spotEurBrl: 6.20,   // R$ por €1 hoje
+    brlDepreciation: 3.5, // % desvalorização anual média do BRL vs EUR/USD
+  });
+
+  const set = key => val => setP(prev => ({ ...prev, [key]: val }));
+
+  const result = useMemo(() => simulate(p), [p]);
+
+  // Meta em euros nominais na data da aposentadoria (corrigida pela inflação EUR)
+  const years = Math.max(0, p.retirementAge - p.currentAge);
+  const goalNominal = Math.round(Number(p.monthlyGoal || 0) * Math.pow(1 + Number(p.eurInflation || 2.5) / 100, years));
+
+  const chartInv   = result?.timeline?.map(r => r.totalInv)  || [];
+  const chartAll   = result?.timeline?.map(r => r.totalAll)  || [];
+
+  const gap60ok = result && result.gapAt60 <= 0;
+  const gap68ok = result && result.gapAt68 <= 0;
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#08111A", color:"#E8F0FE",
+      fontFamily:"'Inter',system-ui,sans-serif", paddingBottom:60 }}>
+
+      {/* HEADER */}
+      <div style={{ background:"linear-gradient(135deg,#08111A 0%,#0A1E30 100%)",
+        borderBottom:"1px solid #1A2D3D", padding:"20px 28px 18px" }}>
+        <div style={{ maxWidth:1280, margin:"0 auto" }}>
+          <div style={{ fontSize:10, color:"#4A9EFF", fontWeight:700,
+            letterSpacing:"0.18em", textTransform:"uppercase", marginBottom:5 }}>
+            Simulador · Independência Financeira
+          </div>
+          <h1 style={{ margin:0, fontSize:24, fontWeight:700, letterSpacing:"-0.02em" }}>
+            <span style={{ color:"#E8F0FE" }}>Meta: </span>
+            <span style={{ color:"#4AFF8C", fontFamily:"'DM Mono',monospace" }}>
+              €{Number(p.monthlyGoal||0).toLocaleString("pt-BR")}/mês
+            </span>
+            <span style={{ color:"#6B7A8D", fontSize:16, marginLeft:16 }}>
+              aos {p.retirementAge} anos · {result?.years || years} anos até lá
+            </span>
+          </h1>
+          <p style={{ margin:"6px 0 0", fontSize:12, color:"#4A6080" }}>
+            Todos os valores em <strong style={{ color:"#C4B5FD" }}>poder de compra de hoje (€ reais)</strong>
+            {" · "}equivalente nominal em {new Date().getFullYear() + years}:{" "}
+            <span style={{ color:"#C4B5FD", fontFamily:"'DM Mono',monospace" }}>
+              {fmt(goalNominal)}/mês
+            </span>
+            {" · "}tributação BR e Holanda separadas
+          </p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth:1280, margin:"0 auto", padding:"20px 24px 0",
+        display:"flex", gap:22, alignItems:"flex-start", flexWrap:"wrap" }}>
+
+        {/* ── INPUTS ── */}
+        <div style={{ width:360, flexShrink:0 }}>
+
+          <Card title="⏱ Horizonte e Meta" color="#A78BFA">
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="Idade atual" value={p.currentAge} onChange={set("currentAge")} suf="anos"/>
+              <Field label="Aposentar" value={p.retirementAge} onChange={set("retirementAge")} suf="anos"/>
+            </div>
+            <Field label="Renda objetivo (€ de hoje)" value={p.monthlyGoal}
+              onChange={set("monthlyGoal")} pre="€" suf="/mês"/>
+            <div style={{ background:"#0A131D", borderRadius:6, padding:"8px 10px",
+              fontSize:11, color:"#5A6E82", lineHeight:1.6 }}>
+              Entre {p.retirementAge} e 68 anos: <strong style={{color:"#FFD166"}}>
+              {Math.max(0, 68 - p.retirementAge)} anos</strong> sem previdência pública.
+              Toda renda vem do seu patrimônio.
+            </div>
+          </Card>
+
+          <Card title="🇧🇷 Renda Fixa Brasil (R$) — declarado BR" color="#4AFF8C">
+            <Field label="Patrimônio atual" value={p.brFixed}
+              onChange={set("brFixed")} pre="R$"/>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="Rendimento nominal" value={p.brFixedRate}
+                onChange={set("brFixedRate")} suf="% a.a." hint="ex: IPCA+7"/>
+              <Field label="Inflação BR" value={p.brInflation}
+                onChange={set("brInflation")} suf="% a.a."/>
+            </div>
+            <Field label="Aporte mensal adicional" value={p.brMonthlyContrib}
+              onChange={set("brMonthlyContrib")} pre="R$"/>
+            <div style={{ fontSize:10, color:"#3A5040", marginTop:-4 }}>
+              IR regressiva 15% aplicada na saída (2+ anos)
+            </div>
+          </Card>
+
+          <Card title="🇺🇸 Ações / ETFs USD — declarado BR" color="#FFD166">
+            <Field label="Patrimônio atual" value={p.usdPortfolio}
+              onChange={set("usdPortfolio")} pre="$"/>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="Retorno nominal" value={p.usdReturn}
+                onChange={set("usdReturn")} suf="% a.a."/>
+              <Field label="Inflação USD" value={p.usdInflation}
+                onChange={set("usdInflation")} suf="% a.a."/>
+            </div>
+            <Field label="Aporte mensal" value={p.usdMonthlyContrib}
+              onChange={set("usdMonthlyContrib")} pre="$"/>
+            <div style={{ fontSize:10, color:"#504A20", marginTop:-4 }}>
+              IR 15% ganho de capital na saída (declarado no Brasil)
+            </div>
+          </Card>
+
+          <Card title="🇳🇱 ETFs EUR — declarado Holanda (Box 3)" color="#4A9EFF">
+            <Field label="Patrimônio atual" value={p.eurPortfolio}
+              onChange={set("eurPortfolio")} pre="€"/>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="Retorno nominal" value={p.eurReturn}
+                onChange={set("eurReturn")} suf="% a.a."/>
+              <Field label="Inflação EUR" value={p.eurInflation}
+                onChange={set("eurInflation")} suf="% a.a."/>
+            </div>
+            <Field label="Aporte mensal" value={p.eurMonthlyContrib}
+              onChange={set("eurMonthlyContrib")} pre="€"/>
+            <div style={{ fontSize:10, color:"#1A3050", marginTop:-4 }}>
+              Box 3: drag de ~2.22% a.a. já embutido no cálculo
+            </div>
+          </Card>
+
+          <Card title="₿ Bitcoin — declarado BR" color="#FF6B9D">
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="Valor atual" value={p.btcValue}
+                onChange={set("btcValue")} pre="R$"/>
+              <Field label="Retorno anual" value={p.btcReturn}
+                onChange={set("btcReturn")} suf="% a.a." hint="especulativo"/>
+            </div>
+          </Card>
+
+          <Card title="🏠 Imóvel — Holanda" color="#60A5FA">
+            <Field label="Valor atual" value={p.nlPropertyValue}
+              onChange={set("nlPropertyValue")} pre="€"/>
+            <Field label="Valorização anual" value={p.nlPropertyInflation}
+              onChange={set("nlPropertyInflation")} suf="% a.a."/>
+            <Radio label="Na aposentadoria" value={p.nlPropertyMode}
+              onChange={set("nlPropertyMode")}
+              options={[{value:"rent",label:"Alugar"},{value:"sell",label:"Vender"}]}/>
+            {p.nlPropertyMode === "rent" &&
+              <Field label="Aluguel mensal bruto" value={p.nlPropertyRent}
+                onChange={set("nlPropertyRent")} pre="€" suf="/mês"/>}
+          </Card>
+
+          <Card title="🏠 Imóvel — Brasil" color="#34D399">
+            <Field label="Valor atual" value={p.brPropertyValue}
+              onChange={set("brPropertyValue")} pre="R$"/>
+            <Field label="Valorização anual" value={p.brPropertyInflation}
+              onChange={set("brPropertyInflation")} suf="% a.a."/>
+            <Radio label="Na aposentadoria" value={p.brPropertyMode}
+              onChange={set("brPropertyMode")}
+              options={[{value:"rent",label:"Alugar"},{value:"sell",label:"Vender"}]}/>
+            {p.brPropertyMode === "rent" &&
+              <Field label="Aluguel mensal bruto" value={p.brPropertyRent}
+                onChange={set("brPropertyRent")} pre="R$" suf="/mês"/>}
+          </Card>
+
+          <Card title="🏛 Previdência — entra somente aos 68" color="#F59E0B">
+            <Field label="Previdência holandesa (BPZ + AOW)" value={p.nlPensionMonthly}
+              onChange={set("nlPensionMonthly")} pre="€" suf="/mês"
+              hint="do mijnpensioenoverzicht.nl"/>
+            <Field label="Previdência brasileira (INSS)" value={p.brPensionMonthly}
+              onChange={set("brPensionMonthly")} pre="R$" suf="/mês"
+              hint="base: salário mínimo"/>
+          </Card>
+
+          <Card title="💱 Câmbio e Desvalorização do Real" color="#C4B5FD">
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+              <Field label="USD/BRL hoje" value={p.spotUsdBrl}
+                onChange={set("spotUsdBrl")} pre="R$ 1$ ="/>
+              <Field label="EUR/BRL hoje" value={p.spotEurBrl}
+                onChange={set("spotEurBrl")} pre="R$ 1€ ="/>
+            </div>
+            <Field label="Desvalorização anual média do Real" value={p.brlDepreciation}
+              onChange={set("brlDepreciation")} suf="% a.a."
+              hint="histórico ~3–5% vs EUR"/>
+            {result && (
+              <div style={{ background:"#0A0A1E", border:"1px solid #2A1A5C",
+                borderRadius:8, padding:"12px 14px", marginTop:4 }}>
+                <div style={{ fontSize:10, color:"#A78BFA", fontWeight:700,
+                  textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:10 }}>
+                  Câmbio projetado aos {p.retirementAge} anos
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                  {[
+                    { label:"R$ por $1", value:`R$\u00A0${result.futUsdBrl.toFixed(2)}`, sub:"USD/BRL futuro" },
+                    { label:"R$ por €1", value:`R$\u00A0${result.futEurBrl.toFixed(2)}`, sub:"EUR/BRL futuro" },
+                    { label:"€ por R$1", value:`€\u00A0${result.brl2eur.toFixed(4)}`, sub:"conversão patrimon. BR" },
+                    { label:"€ por $1", value:`€\u00A0${result.usd2eur.toFixed(3)}`, sub:"conversão USD→EUR" },
+                  ].map(item => (
+                    <div key={item.label} style={{ background:"#12102A", borderRadius:6, padding:"8px 10px" }}>
+                      <div style={{ fontSize:10, color:"#6A5A8A", marginBottom:2 }}>{item.label}</div>
+                      <div style={{ fontSize:15, fontWeight:700, color:"#C4B5FD",
+                        fontFamily:"'DM Mono','Courier New',monospace" }}>{item.value}</div>
+                      <div style={{ fontSize:9, color:"#3A2A5A", marginTop:2 }}>{item.sub}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize:10, color:"#3A2A6A", marginTop:10, lineHeight:1.5 }}>
+                  ⚠ Desvalorização acumulada em {result.years} anos:{" "}
+                  <strong style={{ color:"#FF6B9D" }}>
+                    {Math.round((1 - 1/Math.pow(1 + p.brlDepreciation/100, result.years))*100)}%
+                  </strong>{" "}do poder de compra do Real perdido vs Euro.
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
+
+        {/* ── RESULTS ── */}
+        <div style={{ flex:1, minWidth:0 }}>
+          {!result ? (
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"center",
+              height:200, color:"#3A5060", fontSize:13 }}>
+              Preencha os campos à esquerda para ver a projeção.
+            </div>
+          ) : (
+            <>
+              {/* ── BLOCO PRINCIPAL: renda vs meta ── */}
+              <div style={{ background:"#0E1A26", border:"1px solid #1A2D3D",
+                borderRadius:12, padding:"18px 20px", marginBottom:16 }}>
+
+                {/* linha 1: o que o patrimônio gera */}
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginBottom:14 }}>
+                  <div style={{ flex:1, minWidth:130 }}>
+                    <div style={{ fontSize:10, color:"#5A6E82", fontWeight:600,
+                      textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>
+                      Renda gerada aos {p.retirementAge}
+                    </div>
+                    <div style={{ fontSize:28, fontWeight:700,
+                      color: gap60ok ? "#4AFF8C" : "#FF6B6B",
+                      fontFamily:"'DM Mono',monospace" }}>
+                      {fmt(result.totalAt60)}
+                    </div>
+                    <div style={{ fontSize:10, color:"#3A5060", marginTop:2 }}>
+                      em poder de compra de hoje
+                    </div>
+                  </div>
+                  <div style={{ flex:1, minWidth:130 }}>
+                    <div style={{ fontSize:10, color:"#5A6E82", fontWeight:600,
+                      textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:4 }}>
+                      Renda gerada aos 68+
+                    </div>
+                    <div style={{ fontSize:28, fontWeight:700, color:"#A78BFA",
+                      fontFamily:"'DM Mono',monospace" }}>
+                      {fmt(result.totalAt68)}
+                    </div>
+                    <div style={{ fontSize:10, color:"#3A5060", marginTop:2 }}>
+                      portfólio erodido + previdência
+                    </div>
+                    <div style={{ fontSize:10, color:"#4A6080", marginTop:4 }}>
+                      Portfólio restante aos 68:{" "}
+                      <span style={{ color:"#C4B5FD", fontFamily:"'DM Mono',monospace" }}>
+                        {fmt(result.portfolioAt68)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Fase de retirada: resumo 60→68 ── */}
+                {result.withdrawalYears > 0 && (
+                  <div style={{ background:"#0A0D14", border:"1px solid #2A1A3A",
+                    borderRadius:8, padding:"12px 14px", margin:"14px 0", lineHeight:1.8 }}>
+                    <div style={{ fontSize:10, color:"#FF6B9D", fontWeight:700,
+                      textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:8 }}>
+                      📉 Fase de retirada — {p.retirementAge} aos 68 anos ({result.withdrawalYears} anos)
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))", gap:8 }}>
+                      {[
+                        { label:"Portfólio aos "+p.retirementAge, value:fmt(result.ret.totalInv), color:"#E8F0FE" },
+                        { label:"Aluguel mensal", value:fmt(result.totalRentMonthly), color:"#60A5FA" },
+                        { label:"Retirada do portfólio /mês", value:fmt(result.withdrawalNeeded), color:"#FF6B9D" },
+                        { label:"Portfólio restante aos 68", value:fmt(result.portfolioAt68),
+                          color: result.portfolioAt68 > result.ret.totalInv * 0.5 ? "#4AFF8C" : result.portfolioAt68 > 0 ? "#FFD166" : "#FF6B6B" },
+                      ].map(item=>(
+                        <div key={item.label} style={{ background:"#0E1220", borderRadius:6, padding:"8px 10px" }}>
+                          <div style={{ fontSize:9, color:"#5A6E82", marginBottom:3 }}>{item.label}</div>
+                          <div style={{ fontSize:14, fontWeight:700, color:item.color,
+                            fontFamily:"'DM Mono',monospace" }}>{item.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {result.withdrawalTimeline?.some(r => !r.isSustainable) && (
+                      <div style={{ marginTop:10, fontSize:11, color:"#FF6B6B", fontWeight:600 }}>
+                        ⚠ Portfólio se esgota antes dos 68. Ver aba "Retirada 60→68" para detalhe ano a ano.
+                      </div>
+                    )}
+                    {result.portfolioAt68 > 0 && !result.withdrawalTimeline?.some(r => !r.isSustainable) && (
+                      <div style={{ marginTop:10, fontSize:11, color:"#4AFF8C" }}>
+                        ✓ Portfólio sustenta a retirada até os 68 e chega com {fmt(result.portfolioAt68)} restantes.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* divisor com a lógica de comparação */}
+                <div style={{ borderTop:"1px solid #1A2D3D", paddingTop:14, marginBottom:14 }}>
+                  <div style={{ fontSize:10, color:"#4A6080", lineHeight:1.7, marginBottom:10 }}>
+                    <strong style={{ color:"#8B9AAB" }}>Como ler:</strong> todos os valores acima estão
+                    em <strong style={{ color:"#C4B5FD" }}>€ de hoje (poder de compra atual)</strong>.
+                    A meta de {fmt(p.monthlyGoal)} também está em € de hoje.
+                    A comparação é direta — não é necessário ajustar pela inflação.
+                    O valor nominal de{" "}
+                    <span style={{ color:"#C4B5FD" }}>{fmt(goalNominal)}</span>{" "}
+                    em {new Date().getFullYear() + years} é só quanto você vai
+                    sacar em euros do futuro para ter o mesmo poder de compra —
+                    <strong style={{ color:"#8B9AAB" }}> não é o número comparado no gap.</strong>
+                  </div>
+                </div>
+
+                {/* gap side by side — meta explícita em cada card */}
+                <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+                  <div style={{ flex:1, background: gap60ok?"#0A1E0F":"#1E0A0A",
+                    border:`1px solid ${gap60ok?"#1A5C35":"#5C1A1A"}`,
+                    borderRadius:9, padding:"14px 16px" }}>
+                    <div style={{ fontSize:10, color:"#5A6E82", fontWeight:600,
+                      textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>
+                      Gap aos {p.retirementAge} anos
+                    </div>
+                    {/* equação explícita */}
+                    <div style={{ fontSize:11, color:"#5A6E82", marginBottom:8, lineHeight:1.8 }}>
+                      <span style={{ color: gap60ok?"#4AFF8C":"#FF6B6B",
+                        fontFamily:"'DM Mono',monospace", fontWeight:700 }}>
+                        {fmt(result.totalAt60)}
+                      </span>
+                      <span style={{ color:"#3A5060", margin:"0 6px" }}>gerado vs meta</span>
+                      <span style={{ color:"#E8F0FE",
+                        fontFamily:"'DM Mono',monospace", fontWeight:700 }}>
+                        {fmt(p.monthlyGoal)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize:20, fontWeight:700,
+                      color: gap60ok ? "#4AFF8C" : "#FF6B6B",
+                      fontFamily:"'DM Mono',monospace" }}>
+                      {gap60ok
+                        ? `✓ Sobra ${fmt(Math.abs(result.gapAt60))}/mês`
+                        : `▲ Falta ${fmt(result.gapAt60)}/mês`}
+                    </div>
+                    {!gap60ok && result.addMonthly > 0 && (
+                      <div style={{ fontSize:11, color:"#8B9AAB", marginTop:8 }}>
+                        Aporte adicional para fechar:{" "}
+                        <strong style={{ color:"#FFD166",
+                          fontFamily:"'DM Mono',monospace" }}>
+                          €{result.addMonthly.toLocaleString("pt-BR")}/mês
+                        </strong>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ flex:1, background: gap68ok?"#0A1E0F":"#1E0A0A",
+                    border:`1px solid ${gap68ok?"#1A5C35":"#5C1A1A"}`,
+                    borderRadius:9, padding:"14px 16px" }}>
+                    <div style={{ fontSize:10, color:"#5A6E82", fontWeight:600,
+                      textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>
+                      Gap aos 68 anos
+                    </div>
+                    <div style={{ fontSize:11, color:"#5A6E82", marginBottom:8, lineHeight:1.8 }}>
+                      <span style={{ color: gap68ok?"#4AFF8C":"#FF6B6B",
+                        fontFamily:"'DM Mono',monospace", fontWeight:700 }}>
+                        {fmt(result.totalAt68)}
+                      </span>
+                      <span style={{ color:"#3A5060", margin:"0 6px" }}>gerado vs meta</span>
+                      <span style={{ color:"#E8F0FE",
+                        fontFamily:"'DM Mono',monospace", fontWeight:700 }}>
+                        {fmt(p.monthlyGoal)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize:20, fontWeight:700,
+                      color: gap68ok ? "#4AFF8C" : "#FF6B6B",
+                      fontFamily:"'DM Mono',monospace" }}>
+                      {gap68ok
+                        ? `✓ Sobra ${fmt(Math.abs(result.gapAt68))}/mês`
+                        : `▲ Falta ${fmt(result.gapAt68)}/mês`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* BREAKDOWN RENDA */}
+              <div style={{ background:"#0E1A26", border:"1px solid #1A2D3D",
+                borderRadius:10, padding:"16px 18px", marginBottom:16 }}>
+                <div style={{ fontSize:11, color:"#5A6E82", fontWeight:600,
+                  textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:12 }}>
+                  Composição da renda mensal
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:8 }}>
+                  {[
+                    {label:"Portfólio financeiro", value:result.fromInv, color:"#4A9EFF", note:"regra 4% withdrawal"},
+                    {label:"Imóvel Holanda", value:result.nlPropRent, color:"#60A5FA", note:p.nlPropertyMode==="rent"?"aluguel":"venda"},
+                    {label:"Imóvel Brasil", value:result.brPropRent, color:"#34D399", note:p.brPropertyMode==="rent"?"aluguel":"venda"},
+                    {label:"Previdência NL (68+)", value:Number(p.nlPensionMonthly||0), color:"#A78BFA", note:"BPZ + AOW"},
+                    {label:"Previdência BR (68+)", value:Math.round(Number(p.brPensionMonthly||0) * (result?.brl2eur||0)), color:"#F59E0B", note:"INSS · câmbio futuro"},
+                  ].map(item => (
+                    <div key={item.label} style={{ background:"#08111A", borderRadius:8,
+                      padding:"10px 12px", display:"flex", justifyContent:"space-between",
+                      alignItems:"center", gap:8 }}>
+                      <div>
+                        <div style={{ fontSize:11, color:"#5A6E82" }}>{item.label}</div>
+                        <div style={{ fontSize:10, color:"#2A4050" }}>{item.note}</div>
+                      </div>
+                      <div style={{ fontSize:15, fontWeight:700, color:item.color,
+                        fontFamily:"'DM Mono',monospace", whiteSpace:"nowrap" }}>
+                        {fmt(item.value)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* PATRIMÔNIO NA APOSENTADORIA */}
+              <div style={{ background:"#0E1A26", border:"1px solid #1A2D3D",
+                borderRadius:10, padding:"16px 18px", marginBottom:16 }}>
+                <div style={{ fontSize:11, color:"#5A6E82", fontWeight:600,
+                  textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:12 }}>
+                  Patrimônio projetado aos {p.retirementAge} anos · valores reais · após impostos
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:8 }}>
+                  {[
+                    {label:"Renda Fixa BR",  val:fmt(result.ret.brFixedEUR), orig:fmtR(result.ret.brClose), color:"#4AFF8C"},
+                    {label:"USD Portfolio",  val:fmt(result.ret.usdEUR),     orig:fmtD(result.ret.usdClose),     color:"#FFD166"},
+                    {label:"EUR Portfolio",  val:fmt(result.ret.eurReal),    orig:fmt(result.ret.eurReal),  color:"#4A9EFF"},
+                    {label:"Bitcoin",        val:fmt(result.ret.btcEUR),     orig:fmtR(result.ret.btcBRL),  color:"#FF6B9D"},
+                    {label:"Imóvel NL",      val:fmt(result.ret.nlPropEUR),  orig:fmt(result.ret.nlProp),   color:"#60A5FA"},
+                    {label:"Imóvel BR",      val:fmt(result.ret.brPropEUR),  orig:fmtR(result.ret.brProp),  color:"#34D399"},
+                  ].map(item => (
+                    <div key={item.label} style={{ background:"#08111A",
+                      borderRadius:8, padding:"10px 12px" }}>
+                      <div style={{ fontSize:10, color:"#4A6080", marginBottom:3 }}>{item.label}</div>
+                      <div style={{ fontSize:14, fontWeight:700, color:item.color,
+                        fontFamily:"'DM Mono',monospace" }}>{item.val}</div>
+                      <div style={{ fontSize:10, color:"#2A4050", marginTop:2 }}>{item.orig}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display:"flex", gap:10, marginTop:12 }}>
+                  <div style={{ flex:1, background:"#0A1D30", borderRadius:8,
+                    padding:"12px 14px", textAlign:"center" }}>
+                    <div style={{ fontSize:10, color:"#4A9EFF", fontWeight:600, marginBottom:4 }}>
+                      Total investimentos
+                    </div>
+                    <div style={{ fontSize:20, fontWeight:700, color:"#E8F0FE",
+                      fontFamily:"'DM Mono',monospace" }}>{fmt(result.ret.totalInv)}</div>
+                  </div>
+                  <div style={{ flex:1, background:"#1A0D3A", borderRadius:8,
+                    padding:"12px 14px", textAlign:"center" }}>
+                    <div style={{ fontSize:10, color:"#A78BFA", fontWeight:600, marginBottom:4 }}>
+                      Total incl. imóveis
+                    </div>
+                    <div style={{ fontSize:20, fontWeight:700, color:"#E8F0FE",
+                      fontFamily:"'DM Mono',monospace" }}>{fmt(result.ret.totalAll)}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* CHART */}
+              <div style={{ background:"#0E1A26", border:"1px solid #1A2D3D",
+                borderRadius:10, padding:"16px 18px", marginBottom:16 }}>
+                <div style={{ fontSize:11, color:"#5A6E82", fontWeight:600,
+                  textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:8 }}>
+                  Evolução do patrimônio total em € (valores reais)
+                </div>
+                <div style={{ fontSize:10, color:"#4A9EFF", marginBottom:4 }}>■ Investimentos financeiros</div>
+                <MiniChart data={chartInv} color="#4A9EFF"/>
+                <div style={{ fontSize:10, color:"#A78BFA", margin:"10px 0 4px" }}>■ Incl. imóveis</div>
+                <MiniChart data={chartAll} color="#A78BFA"/>
+                <div style={{ display:"flex", justifyContent:"space-between",
+                  fontSize:10, color:"#2A4050", marginTop:4 }}>
+                  <span>Hoje ({p.currentAge} anos)</span>
+                  <span>Aposentadoria ({p.retirementAge} anos)</span>
+                </div>
+              </div>
+
+              {/* NOTA */}
+              <div style={{ background:"#08111A", border:"1px solid #1A2D3D",
+                borderRadius:8, padding:"12px 16px", fontSize:10, color:"#3A5060",
+                lineHeight:1.7, marginBottom:16 }}>
+                <strong style={{ color:"#5A6E82" }}>Metodologia:</strong> Valores reais
+                descontados da inflação de cada moeda. IR Brasil: 15% regressiva sobre
+                renda fixa; 15% ganho de capital sobre variável. Box 3 Holanda: ~2.22%
+                drag anual embutido. Renda na aposentadoria pela regra dos 4% (safe
+                withdrawal rate). Câmbio futuro é estimativa — cenário pessimista (BRL
+                desvalorizado) pode reduzir significativamente o patrimônio BR em €.
+              </div>
+
+              <TimelineTable timeline={result.timeline} withdrawalTimeline={result.withdrawalTimeline} retAge={p.retirementAge}/>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
